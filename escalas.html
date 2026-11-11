@@ -168,6 +168,10 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .lab-ctrls .field{min-width:170px}
 .lab-win input{width:100%;accent-color:var(--steel)}
 .lab-win output{color:var(--ink);font-weight:600}
+.lab-win-q{display:flex;gap:6px;margin-top:6px}
+.lab-win-q button{font:inherit;font-size:12px;padding:2px 9px;border-radius:999px;border:1px solid var(--line,#c3cbd4);background:transparent;color:inherit;cursor:pointer}
+.lab-win-q button.on{background:var(--steel);border-color:var(--steel);color:#fff}
+.lab-env-note{font-size:13px;color:var(--muted,#5a6674);margin:4px 0 0}
 .lab-iv{margin:4px 0 10px;padding-left:18px;color:var(--ink);font-size:.93rem}
 .lab-listen{margin:6px 0 10px}
 .lab-waves{display:grid;gap:4px}
@@ -342,7 +346,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
       <div class="lab-ctrls">
         <label class="field"><span>Dibujo de la onda</span><select id="labWave"><option value="sine">Onda pura (seno)</option><option value="guitar">Con armónicos (como una cuerda)</option></select></label>
         <label class="field"><span>Sonido</span><select id="labSnd"><option value="guitar">Guitarra</option><option value="sine">Onda pura</option></select></label>
-        <label class="field lab-win"><span>Ventana de tiempo <output id="labWinOut">20 ms</output></span><input type="range" id="labWin" min="5" max="60" step="1" value="20"></label>
+        <label class="field lab-win"><span>Ventana de tiempo <output id="labWinOut">20 ms</output></span><input type="range" id="labWin" min="0" max="1000" step="1" value="231"><span class="lab-win-q"><button type="button" data-w="20">20 ms</button><button type="button" data-w="200">200 ms</button><button type="button" data-w="2000">2 s</button></span></label>
       </div>
     </div>
     <div id="labIvWrap" hidden><ul id="labIntervals" class="lab-iv"></ul></div>
@@ -1465,6 +1469,18 @@ function buildLab() {
   renderLab();
   return ns.length ? (nm ? nm + ', armado a mano' : 'Tu acorde') : 'Laboratorio: toca el diapasón para agregar notas';
 }
+const WIN_MIN = 5, WIN_MAX = 2000;
+function posToWin(v) {
+  const ms = WIN_MIN * Math.pow(WIN_MAX / WIN_MIN, v / 1000);
+  const step = ms < 50 ? 1 : ms < 200 ? 5 : ms < 1000 ? 10 : 50;
+  return Math.round(ms / step) * step;
+}
+function winToPos(ms) { return Math.round(1000 * Math.log(Math.max(WIN_MIN, Math.min(WIN_MAX, ms)) / WIN_MIN) / Math.log(WIN_MAX / WIN_MIN)); }
+function fmtWin(ms) { return ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(ms % 1000 ? 2 : 0).replace(/0$/, '').replace('.', ',') + ' s'; }
+function labWinLabel() {
+  $('#labWinOut').textContent = fmtWin(state.lab.win);
+  document.querySelectorAll('.lab-win-q button').forEach(b => b.classList.toggle('on', +b.dataset.w === state.lab.win));
+}
 function waveVal(f, t, type) {
   if (type === 'sine') return Math.sin(2 * Math.PI * f * t);
   let v = 0, norm = 0;
@@ -1487,6 +1503,7 @@ function renderLab() {
   const waves = $('#labWaves'); waves.innerHTML = '';
   if (!ns.length) { const p = document.createElement('p'); p.className = 'lab-empty'; p.textContent = 'Toca el diapasón (arriba) para agregar notas, una por cuerda, o elige un ejemplo.'; waves.appendChild(p); return; }
   const W = Math.max(260, waves.clientWidth - 150), H = 54, N = 480;
+  const fMax = Math.max(...ns.map(n => freqOf(n.midi))) * (type === 'sine' ? 1 : 8);
   const row = (label, sub, color, fn, k, isSum) => {
     const r = document.createElement('div'); r.className = 'lab-row' + (isSum ? ' sum' : ''); r.dataset.k = k;
     const lab = document.createElement('div'); lab.className = 'lab-lbl';
@@ -1498,9 +1515,27 @@ function renderLab() {
     const svg = el('svg', { width:W, height:isSum ? H * 1.5 : H, viewBox:'0 0 ' + W + ' ' + (isSum ? H * 1.5 : H), class:'lab-svg' });
     const hh = (isSum ? H * 1.5 : H) / 2;
     el('line', { x1:0, x2:W, y1:hh, y2:hh, class:'lab-axis' }, svg);
-    let d = '';
-    for (let i = 0; i <= N; i++) { const t = i / N * win, v = fn(t); d += (i ? 'L' : 'M') + (i / N * W).toFixed(1) + ',' + (hh - v * (hh - 4)).toFixed(1); }
-    el('path', { d, fill:'none', stroke:isSum ? 'var(--ink)' : color, 'stroke-width':isSum ? 2 : 1.5 }, svg);
+    const stroke = isSum ? 'var(--ink)' : color, yv = v => (hh - v * (hh - 4)).toFixed(1);
+    const cyclesPerPx = fMax * win / W;
+    if (cyclesPerPx < 0.12) {
+      // pocas oscilaciones: se dibuja la onda tal cual
+      const n = Math.max(N, Math.ceil(W * 2)); let d = '';
+      for (let i = 0; i <= n; i++) { const t = i / n * win; d += (i ? 'L' : 'M') + (i / n * W).toFixed(1) + ',' + yv(fn(t)); }
+      el('path', { d, fill:'none', stroke, 'stroke-width':isSum ? 2 : 1.5 }, svg);
+    } else {
+      // muchas oscilaciones por píxel: se dibuja la envolvente (máximo y mínimo de cada columna)
+      const cols = Math.ceil(W), sub = Math.max(12, Math.min(240, Math.ceil(cyclesPerPx * 24)));
+      const hi = new Array(cols), lo = new Array(cols);
+      for (let x = 0; x < cols; x++) {
+        let mx = -Infinity, mn = Infinity;
+        for (let j = 0; j < sub; j++) { const v = fn((x + (j + .5) / sub) / cols * win); if (v > mx) mx = v; if (v < mn) mn = v; }
+        hi[x] = mx; lo[x] = mn;
+      }
+      let d = 'M0,' + yv(hi[0]);
+      for (let x = 1; x < cols; x++) d += 'L' + x + ',' + yv(hi[x]);
+      for (let x = cols - 1; x >= 0; x--) d += 'L' + x + ',' + yv(lo[x]);
+      el('path', { d: d + 'Z', fill:stroke, 'fill-opacity':isSum ? .85 : .55, stroke, 'stroke-width':.6 }, svg);
+    }
     r.append(lab, svg); waves.appendChild(r);
   };
   ns.forEach((n, k) => {
@@ -1509,11 +1544,17 @@ function renderLab() {
   });
   if (ns.length > 1) {
     let peak = 0; const fs = ns.map(n => freqOf(n.midi));
-    for (let i = 0; i <= 600; i++) { const t = i / 600 * win; peak = Math.max(peak, Math.abs(fs.reduce((a, f) => a + waveVal(f, t, type), 0))); }
+    const np = Math.min(60000, Math.max(600, Math.ceil(fMax * win * 8)));
+    for (let i = 0; i <= np; i++) { const t = i / np * win; peak = Math.max(peak, Math.abs(fs.reduce((a, f) => a + waveVal(f, t, type), 0))); }
     row('Suma', 'lo que llega al oído', '', t => fs.reduce((a, f) => a + waveVal(f, t, type), 0) / (peak || 1), -1, true);
   }
-  const ax = document.createElement('div'); ax.className = 'lab-time'; ax.textContent = '0 ms … ' + state.lab.win + ' ms';
+  const ax = document.createElement('div'); ax.className = 'lab-time'; ax.textContent = '0 … ' + fmtWin(state.lab.win);
   waves.appendChild(ax);
+  if (fMax * win / W >= 0.12) {
+    const p = document.createElement('p'); p.className = 'lab-env-note';
+    p.textContent = 'Con esta ventana las vibraciones son tan rápidas que se ven como una franja: su borde muestra cómo sube y baja el volumen. Si la suma se ensancha y se angosta una y otra vez, eso es el batido que se escucha como un temblor.';
+    waves.appendChild(p);
+  }
 }
 function labMark(k, on) { document.querySelectorAll('.lab-row').forEach(r => { if (+r.dataset.k === k) r.classList.toggle('on', on); }); }
 async function labPlay(how, k) {
@@ -1556,10 +1597,12 @@ function initLab() {
   pr.appendChild(clr);
   $('#labWave').addEventListener('change', e => { state.lab.wave = e.target.value; renderLab(); save(); });
   $('#labSnd').addEventListener('change', e => { state.lab.snd = e.target.value; save(); });
-  $('#labWin').addEventListener('input', e => { state.lab.win = +e.target.value; $('#labWinOut').textContent = state.lab.win + ' ms'; renderLab(); save(); });
+  const setWin = ms => { state.lab.win = ms; $('#labWin').value = winToPos(ms); labWinLabel(); renderLab(); save(); };
+  $('#labWin').addEventListener('input', e => { state.lab.win = posToWin(+e.target.value); labWinLabel(); renderLab(); save(); });
+  document.querySelectorAll('.lab-win-q button').forEach(b => b.addEventListener('click', () => setWin(+b.dataset.w)));
   $('#labSep').addEventListener('click', () => labPlay('sep'));
   $('#labTog').addEventListener('click', () => labPlay('together'));
-  $('#labWave').value = state.lab.wave; $('#labSnd').value = state.lab.snd; $('#labWin').value = state.lab.win; $('#labWinOut').textContent = state.lab.win + ' ms';
+  $('#labWave').value = state.lab.wave; $('#labSnd').value = state.lab.snd; $('#labWin').value = winToPos(state.lab.win); labWinLabel();
   // tocar el diapasón para poner o quitar notas
   $('#neck').addEventListener('click', e => {
     if (state.mode !== 'lab' || !fbGeo) return;
